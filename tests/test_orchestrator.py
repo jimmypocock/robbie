@@ -1306,7 +1306,7 @@ async def test_the_heartbeat_carries_the_panel_summary(orch, monkeypatch):
     orch.cfg.props_url = "http://host.docker.internal:4021"
     _approved(orch.db)
     orch.db.record_spend(repo="acme/app", pr=9, kind="failed", cost_usd=0.3, duration_s=5)
-    await orch._heartbeat()
+    await orch.heartbeat()
     (beat,) = beats
     assert beat["today"] == {"ok": 1}
     assert [r["pr"] for r in beat["reviews"]] == [7]
@@ -1327,7 +1327,7 @@ async def test_a_quiet_run_sends_no_heartbeat(orch, monkeypatch):
     monkeypatch.setattr(orch_mod.props_bridge, "heartbeat", fake_heartbeat)
     orch.cfg.props_url = "http://host.docker.internal:4021"
     orch.no_publish = True
-    await orch._heartbeat()
+    await orch.heartbeat()
     assert beats == []
 
 
@@ -1382,5 +1382,57 @@ async def test_the_heartbeat_names_the_pause(orch, tmp_path, monkeypatch):
     monkeypatch.setattr(orch_mod.props_bridge, "heartbeat", fake_heartbeat)
     orch.cfg.props_url = "http://host.docker.internal:4021"
     _creds_file(orch, tmp_path, expires_in_min=-30)
-    await orch._heartbeat()
+    await orch.heartbeat()
     assert "credentials expired" in beats[0]["paused"]
+
+
+@pytest.mark.asyncio
+async def test_the_beat_runs_on_its_own_clock_not_the_tick(orch, monkeypatch):
+    """A tick waits for every container it starts, so an hour of back-to-back
+    reviews used to leave the board silent while the daemon was at its busiest
+    — indistinguishable from down (2026-10-01)."""
+    import asyncio
+
+    from robbie import main as mainmod
+
+    beats = 0
+
+    async def fake_beat():
+        nonlocal beats
+        beats += 1
+
+    monkeypatch.setattr(orch, "heartbeat", fake_beat)
+    monkeypatch.setattr(mainmod, "BEAT_INTERVAL_S", 0.01)
+
+    stop = asyncio.Event()
+    task = asyncio.create_task(mainmod._beats(orch, stop))
+    await asyncio.sleep(0.05)
+    stop.set()
+    await task
+
+    assert beats >= 2, "the beat should fire repeatedly without any tick running"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_beat_does_not_kill_the_daemon(orch, monkeypatch):
+    import asyncio
+
+    from robbie import main as mainmod
+
+    calls = 0
+
+    async def exploding_beat():
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("tunnel down")
+
+    monkeypatch.setattr(orch, "heartbeat", exploding_beat)
+    monkeypatch.setattr(mainmod, "BEAT_INTERVAL_S", 0.01)
+
+    stop = asyncio.Event()
+    task = asyncio.create_task(mainmod._beats(orch, stop))
+    await asyncio.sleep(0.05)
+    stop.set()
+    await task
+
+    assert calls >= 2, "a missed beat must not end the loop"
