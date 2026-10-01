@@ -339,11 +339,17 @@ async def _loop(cfg: configmod.Config, orch: Orchestrator, *, quiet: bool = Fals
 
     logger.info(
         "robbie up: %d repo(s), backend=%s, %d concurrent review(s), tick %ds, "
-        "meters every %ds",
+        "meters every %ds, beat every %ds",
         len(cfg.repos), cfg.backend, cfg.max_concurrent_reviews, cfg.poll_interval_s,
-        cfg.budget.usage_poll_s,
+        cfg.budget.usage_poll_s, BEAT_INTERVAL_S,
     )
-    tasks = [asyncio.create_task(_meters(cfg, orch.secrets, orch.db, stop))]
+    tasks = [
+        asyncio.create_task(_meters(cfg, orch.secrets, orch.db, stop)),
+        # NOT gated on `quiet` like the two below: `Orchestrator.heartbeat`
+        # already returns early when quiet, so a second gate here would be one
+        # more place to keep in step for no change in behaviour.
+        asyncio.create_task(_beats(orch, stop)),
+    ]
     # a quiet run writes nothing, and triage is nothing but writes
     if cfg.issue_interval_s > 0 and not quiet:
         tasks.append(asyncio.create_task(_issues(cfg, orch, stop)))
@@ -358,6 +364,26 @@ async def _loop(cfg: configmod.Config, orch: Orchestrator, *, quiet: bool = Fals
         for task in tasks:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+
+
+BEAT_INTERVAL_S = 120
+
+
+async def _beats(orch: Orchestrator, stop: asyncio.Event) -> None:
+    """Liveness on its own clock.
+
+    The heartbeat used to ride the end of a tick, and a tick waits for every
+    container it starts — so an hour of back-to-back reviews looked identical
+    to a dead daemon. Beating independently means silence only ever means
+    silence.
+    """
+    while not stop.is_set():
+        try:
+            await orch.heartbeat()
+        except Exception:  # noqa: BLE001 — a missed beat must not end the daemon
+            logger.debug("beat not delivered", exc_info=True)
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(stop.wait(), timeout=BEAT_INTERVAL_S)
 
 
 async def _ticks(

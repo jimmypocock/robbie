@@ -202,13 +202,18 @@ class Orchestrator:
                 for pr in prs:
                     jobs.append(tg.create_task(self._handle(repo, pr)))
         outcomes = answered + [job.result() for job in jobs]
-        await self._heartbeat()
+        await self.heartbeat()
         return outcomes
 
-    async def _heartbeat(self) -> None:
+    async def heartbeat(self) -> None:
         """The board's one-glance reviewer card: what the panel would say, pushed
-        once per tick over the bridge. Best-effort like every bridge call; quiet
-        runs say nothing anywhere, the board included."""
+        over the bridge. Best-effort like every bridge call; quiet runs say
+        nothing anywhere, the board included.
+
+        Driven by its own timer, NOT by the tick: a tick waits for every
+        container it started, so a run of long reviews used to leave the board
+        silent for an hour while the daemon was at its busiest — which reads as
+        "down" when it means "buried" (2026-10-01)."""
         if self._quiet or not self.cfg.props_url:
             return
         midnight = budget.midnight_ms()
