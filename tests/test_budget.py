@@ -43,8 +43,12 @@ def secrets(tmp_path: Path) -> Secrets:
     creds = tmp_path / "creds.json"
     creds.write_text(json.dumps({"claudeAiOauth": {"accessToken": "t"}}))
     return Secrets(
-        gh_token="w", slack_bot_token="s", reviewer_gh_token="r", claude_credentials=creds,
-        review_base_url="https://endpoint.example", review_api_token="k",
+        gh_token="w",
+        slack_bot_token="s",
+        reviewer_gh_token="r",
+        claude_credentials=creds,
+        review_base_url="https://endpoint.example",
+        review_api_token="k",
     )
 
 
@@ -60,11 +64,31 @@ class FakeResponse:
 
 
 def answers(monkeypatch, pct: float, *, session: float = 0.0, weekly: float = 0.0) -> None:
-    """Both meters answer, dispatched on the URL like the real ones are."""
-    plan = {"five_hour": {"utilization": pct, "resets_at": "2026-08-04T19:10:00Z"}}
+    """Both meters answer, dispatched on the URL like the real ones are.
+
+    The plan half mirrors what the endpoint ACTUALLY returns as of Nov 2026:
+    `five_hour` PRESENT AND NULL — the Ultra plan no longer has that window — with
+    the live numbers in the self-describing `limits[]` array. The previous fake
+    could only express the old single-key shape, which is why the suite stayed
+    green through three days of a gate that was not gating.
+    """
+    plan = {
+        "five_hour": None,
+        "limits": [
+            {
+                "kind": "usage",
+                "group": "seven_day",
+                "percent": pct,
+                "severity": "ok",
+                "resets_at": "2026-08-04T19:10:00Z",
+                "is_active": True,
+            },
+        ],
+    }
     endpoint = {"limits": {"session": {"usage": session}, "weekly": {"usage": weekly}}}
     monkeypatch.setattr(
-        budget.httpx, "get",
+        budget.httpx,
+        "get",
         lambda url, **k: FakeResponse(endpoint if "/api/usage" in url else plan),
     )
 
@@ -123,7 +147,8 @@ def test_the_api_backend_polls_no_plan_meter(tmp_path, db, monkeypatch):
     spent on a number nothing reads."""
     asked = []
     monkeypatch.setattr(
-        budget.httpx, "get",
+        budget.httpx,
+        "get",
         lambda url, **k: asked.append(url) or FakeResponse({"limits": {}}),
     )
     budget.poll(cfg(tmp_path, backend="api"), secrets(tmp_path), db)
@@ -141,7 +166,20 @@ def test_the_token_never_reaches_a_command_line(tmp_path, db, monkeypatch):
     def fake_get(url, **kw):
         if url == budget.USAGE_URL:
             seen.update(url=url, headers=kw.get("headers", {}))
-        return FakeResponse({"five_hour": {"utilization": 10, "resets_at": "x"}})
+        return FakeResponse(
+            {
+                "five_hour": None,
+                "limits": [
+                    {
+                        "kind": "usage",
+                        "group": "seven_day",
+                        "percent": 10,
+                        "is_active": True,
+                        "resets_at": "x",
+                    }
+                ],
+            }
+        )
 
     monkeypatch.setattr(budget.httpx, "get", fake_get)
     budget.poll(cfg(tmp_path), secrets(tmp_path), db)
@@ -156,9 +194,7 @@ def test_room_for_one_review_is_room_enough(tmp_path, db, monkeypatch):
     assert budget.check(conf, db).allowed
 
 
-def test_a_reading_under_the_cutoff_still_refuses_without_room_to_finish(
-    tmp_path, db, monkeypatch
-):
+def test_a_reading_under_the_cutoff_still_refuses_without_room_to_finish(tmp_path, db, monkeypatch):
     """85% passes the old test and lands at 93%. That is the bug the reserve fixes."""
     conf = cfg(tmp_path, stop_pct=90, reserve_pct=8)
     meter(monkeypatch, conf, db, tmp_path, 85)
@@ -261,7 +297,18 @@ def test_an_unreadable_endpoint_says_so_rather_than_guessing(tmp_path, db, monke
 def test_one_meter_failing_does_not_cost_the_other_its_reading(tmp_path, db, monkeypatch):
     """They are different providers; the account's is the one that rate-limits."""
     conf = endpoint_cfg(tmp_path, stop_pct=90, endpoint_stop_pct=80)
-    plan = {"five_hour": {"utilization": 10, "resets_at": "x"}}
+    plan = {
+        "five_hour": None,
+        "limits": [
+            {
+                "kind": "usage",
+                "group": "seven_day",
+                "percent": 10,
+                "is_active": True,
+                "resets_at": "x",
+            }
+        ],
+    }
 
     def half_broken(url, **kw):
         if "/api/usage" in url:
@@ -336,7 +383,20 @@ def test_a_token_rotated_mid_read_is_retried_rather_than_failing(tmp_path, monke
                 json.dumps({"claudeAiOauth": {"accessToken": "new", "expiresAt": 9e12}})
             )
             raise _unauthorized()
-        return FakeResponse({"five_hour": {"utilization": 12, "resets_at": "x"}})
+        return FakeResponse(
+            {
+                "five_hour": None,
+                "limits": [
+                    {
+                        "kind": "usage",
+                        "group": "seven_day",
+                        "percent": 12,
+                        "is_active": True,
+                        "resets_at": "x",
+                    }
+                ],
+            }
+        )
 
     monkeypatch.setattr(budget.httpx, "get", fake_get)
     pct, _ = budget._fetch_plan(sec)
@@ -353,3 +413,121 @@ def test_a_token_that_is_simply_expired_says_so_instead_of_a_401_url(tmp_path, m
     monkeypatch.setattr(budget.httpx, "get", fake_get)
     with pytest.raises(RuntimeError, match="run `claude` on the host"):
         budget._fetch_plan(sec)
+
+
+# ── the window that stopped existing ─────────────────────────────────────────
+#
+# Measured on Jimmy's account 2026-11-02: `five_hour` came back null because the
+# Ultra plan no longer has a five-hour window, and `data["five_hour"]["utilization"]`
+# raised `'NoneType' object is not subscriptable` on every poll from 10-30 on.
+# `poll` stored the text, the gate read "unreadable" and allowed the review, so
+# the budget control was off and said so once a day in a line that read like a
+# warning rather than like an outage.
+
+
+def test_a_plan_with_no_five_hour_window_still_reads(tmp_path, db, monkeypatch):
+    """The exact payload shape that broke it: the key is there and it is null."""
+    payload = {
+        "five_hour": None,
+        "seven_day": {"utilization": 44.0, "resets_at": "2026-11-09T14:00:00Z"},
+        "limits": [
+            {
+                "kind": "usage",
+                "group": "seven_day",
+                "percent": 44,
+                "severity": "warning",
+                "resets_at": "2026-11-09T14:00:00Z",
+                "is_active": True,
+            },
+        ],
+    }
+    pct, note = budget.worst_active_limit(payload)
+    assert pct == 44.0
+    assert "seven_day" in note and "44%" in note
+
+
+def test_the_worst_ACTIVE_window_is_the_one_that_binds(tmp_path):
+    pct, note = budget.worst_active_limit(
+        {
+            "limits": [
+                {
+                    "kind": "usage",
+                    "group": "seven_day",
+                    "percent": 20,
+                    "is_active": True,
+                    "resets_at": "x",
+                },
+                {
+                    "kind": "usage",
+                    "group": "opus",
+                    "percent": 81,
+                    "is_active": True,
+                    "severity": "critical",
+                    "resets_at": "y",
+                },
+            ]
+        }
+    )
+    assert pct == 81.0
+    assert "opus" in note and "critical" in note and "worst of 2" in note
+
+
+def test_an_inactive_window_does_not_bind(tmp_path):
+    pct, _ = budget.worst_active_limit(
+        {
+            "limits": [
+                {
+                    "kind": "usage",
+                    "group": "seven_day",
+                    "percent": 10,
+                    "is_active": True,
+                    "resets_at": "x",
+                },
+                {
+                    "kind": "usage",
+                    "group": "gone",
+                    "percent": 99,
+                    "is_active": False,
+                    "resets_at": "y",
+                },
+            ]
+        }
+    )
+    assert pct == 10.0
+
+
+def test_no_active_windows_is_an_ERROR_and_never_zero_percent(tmp_path):
+    """ "I found nothing" and "nothing is used" must not be the same answer.
+
+    That equivalence is the whole bug: a reader that returns 0.0 here would have
+    reported a healthy, empty budget while the plan's shape was changing underneath.
+    """
+    for payload in (
+        {},
+        {"limits": []},
+        {"limits": [{"group": "x", "percent": 5, "is_active": False}]},
+    ):
+        with pytest.raises(RuntimeError, match="no active limit windows"):
+            budget.worst_active_limit(payload)
+
+
+def test_an_unreadable_plan_meter_falls_back_to_measured_dollars(tmp_path, db, monkeypatch):
+    """Unreadable stopped meaning unguarded.
+
+    A meter outage used to be transient — a 429, a rotated token. Once a plan can
+    simply stop having the window we ask for, "unreadable" is the steady state, so
+    the gate falls through to the dollars robbie measured itself.
+    """
+    monkeypatch.setattr(budget.httpx, "get", lambda *a, **k: 1 / 0)
+    conf = cfg(tmp_path)
+    conf.budget.daily_usd = 20.0
+    budget.poll(conf, secrets(tmp_path), db)
+
+    v = budget.check(conf, db)
+    assert v.allowed, "nothing spent yet, so the floor still lets it through"
+    assert "unreadable" in v.detail and "measured spend" in v.detail
+
+    db.record_spend(repo="r/r", pr=1, kind="review", cost_usd=19.50, duration_s=1.0)
+    v = budget.check(conf, db)
+    assert not v.allowed, "over the measured ceiling it must refuse, not run blind"
+    assert "$19.50" in v.detail or "19.50" in v.detail
