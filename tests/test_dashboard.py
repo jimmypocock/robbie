@@ -100,7 +100,7 @@ def test_the_panel_shows_the_stored_meter_without_asking_the_provider(cfg, db, m
     cfg.backend = "oauth"
     db.write_meter(budget.PLAN, pct=42.0, note="2026-08-04T19:10:00Z")
 
-    assert "plan at 42%" in render(cfg, db)
+    assert "5h window at 42%" in render(cfg, db)
 
 
 def test_it_answers_over_http(cfg, db):

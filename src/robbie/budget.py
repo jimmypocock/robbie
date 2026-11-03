@@ -4,16 +4,11 @@ Two backends, one question ("may I start another review?"):
 
 - **api**: sum today's recorded cost from SQLite against `budget.daily_usd`. The
   reviewer reports `total_cost_usd` per run, so this is measured, not estimated.
-- **oauth**: read the worst ACTIVE window the plan reports and pause at
-  `budget.stop_pct`, so robbie can't eat a human's own headroom on a shared plan.
-  Deliberately not a named window: the five-hour one was removed from the Ultra
-  plan in Nov 2026 and the key went to `null`, which crashed the read.
+- **oauth**: read the plan's 5-hour window and pause at `budget.stop_pct`, so
+  robbie can't eat a human's own headroom on a shared plan.
 
-An unreadable budget is never treated as "unlimited". It used to warn once and
-keep going, which was right while outages were transient and wrong once a plan
-could simply stop having the window we asked for — a daily warning beside a gate
-that is not running. It now falls back to `budget.daily_usd` against the dollars
-robbie measured itself, so the floor holds even when the vendor's shape changes.
+An unreadable budget is never treated as "unlimited": it warns once and keeps
+going, so a broken metrics endpoint degrades loudly instead of silently.
 
 Nothing here calls a provider except `poll`. It runs on its own clock in the
 daemon and leaves the numbers in SQLite; the gate, the panel and any second
@@ -82,7 +77,7 @@ def _stored(db: Db, name: str) -> tuple[float, str] | str:
     """The poller's number for `name`, or a sentence saying why there isn't one."""
     row = db.read_meter(name)
     if row is None or not row["read_at"]:
-        return row["error"] if row and row["error"] else "not polled yet"
+        return (row["error"] if row and row["error"] else "not polled yet")
     age_s = (now_ms() - int(row["read_at"])) / 1000
     # >=, not >: a reading exactly at the limit is not trusted — and the strict
     # form made the STALE_S=0 test a same-millisecond coin flip
@@ -136,36 +131,20 @@ def _check_oauth(cfg: Config, db: Db, inflight: int) -> Verdict:
     """
     reading = _stored(db, PLAN)
     if isinstance(reading, str):
-        # THE METER IS THE PRIMARY VIEW, NOT THE ONLY ONE.
-        #
-        # This returned allow + "running unguarded", which was a fair trade while
-        # a meter outage was transient — a 429, or a token rotation, over in
-        # minutes. It stopped being fair the day the five-hour window left the
-        # plan: then "unreadable" is the STEADY STATE and the gate is simply off,
-        # announcing itself once a day in a line that reads like a warning rather
-        # than like "the budget control you think you have is not running."
-        #
-        # So fall through to the dollars robbie measured itself. No vendor rename
-        # can null that number: `total_cost_usd` comes back from every reviewer
-        # run and lands in SQLite, which is the same thing `backend=api` has
-        # always gated on. The meter, when readable, still wins — it sees the
-        # whole account, including the human's own usage, which this cannot.
-        fallback = _check_api(cfg, db, inflight)
         return Verdict(
-            fallback.allowed,
-            f"plan meter unreadable ({reading}); falling back to measured "
-            f"spend — {fallback.detail}",
+            True,
+            f"usage unreadable ({reading}); running unguarded",
             # dated, like every other pause key: a constant one is announced once
             # in the life of the database and every later outage is silent
-            notice_key=fallback.notice_key or f"budget:unreadable:{datetime.now(UTC):%Y-%m-%d}",
+            notice_key=f"budget:unreadable:{datetime.now(UTC):%Y-%m-%d}",
         )
     (pct, resets_at), held = reading, (inflight + 1) * cfg.budget.reserve_pct
     if pct + held <= cfg.budget.stop_pct:
-        return Verdict(True, f"plan at {pct:.0f}% (+{held:.0f}% held back) — {resets_at}")
+        return Verdict(True, f"5h window at {pct:.0f}% (+{held:.0f}% held back)")
     return Verdict(
         False,
-        f"plan at {pct:.0f}% +{held:.0f}% held for {inflight} running + 1 "
-        f"(cutoff {cfg.budget.stop_pct}%); {resets_at}",
+        f"5h window at {pct:.0f}% +{held:.0f}% held for {inflight} running + 1 "
+        f"(cutoff {cfg.budget.stop_pct}%); resumes around {resets_at}",
         # resets_at jitters by ~1s between calls, so key on the rounded minute
         notice_key=f"budget:{_minute_key(resets_at)}",
     )
@@ -199,52 +178,6 @@ def _oauth(secrets: Secrets) -> dict:
     return json.loads(secrets.claude_credentials.read_text())["claudeAiOauth"]  # type: ignore[union-attr]
 
 
-def worst_active_limit(data: dict) -> tuple[float, str]:
-    """The highest utilisation among the windows this plan actually has.
-
-    REPLACES A NAMED-WINDOW READ, and the reason is the whole point. This used to
-    be `data["five_hour"]["utilization"]`. Anthropic removed the five-hour window
-    from the Ultra plan, so that key went to `null` — present, not missing — and
-    the subscript raised `'NoneType' object is not subscriptable` on every poll.
-    `poll` stores the exception text, `_check_oauth` reads it as "unreadable" and
-    allows the review, so the gate had silently stopped gating (measured
-    2026-11-02; the last good reading was 10-30).
-
-    Null-guarding that key would only have made the outage permanent and quiet.
-    The fix is to stop naming windows: `limits[]` is self-describing
-    (`kind`, `group`, `percent`, `severity`, `resets_at`, `is_active`), so when a
-    plan gains or loses a window the list changes shape and this does not. The
-    worst ACTIVE entry is the binding constraint whatever it happens to be called.
-
-    `percent` is 0-100, matching the old `utilization` and `budget.stop_pct`
-    (verified against the last stored reading before the break: pct=2.0).
-
-    No entries at all is an ERROR, not 0%. "I found nothing" and "nothing is
-    used" must never be the same answer — that equivalence is what let this break
-    go unnoticed for three days.
-    """
-    rows = [
-        r
-        for r in (data.get("limits") or [])
-        if isinstance(r, dict) and r.get("is_active") and r.get("percent") is not None
-    ]
-    if not rows:
-        raise RuntimeError(
-            "usage endpoint returned no active limit windows — the plan's shape changed "
-            "again, or the response is not what we think it is"
-        )
-    worst = max(rows, key=lambda r: float(r["percent"]))
-    label = " ".join(str(worst.get(k)) for k in ("kind", "group") if worst.get(k))
-    others = len(rows) - 1
-    note = f"{label or 'window'} at {float(worst['percent']):.0f}%"
-    if worst.get("severity"):
-        note += f" ({worst['severity']})"
-    if others:
-        note += f", worst of {len(rows)}"
-    note += f"; resets {worst.get('resets_at')}"
-    return float(worst["percent"]), note
-
-
 def _read_usage(token: str) -> tuple[float, str]:
     resp = httpx.get(
         USAGE_URL,
@@ -252,7 +185,8 @@ def _read_usage(token: str) -> tuple[float, str]:
         timeout=15,
     )
     resp.raise_for_status()
-    return worst_active_limit(resp.json())
+    data = resp.json()
+    return float(data["five_hour"]["utilization"]), str(data["five_hour"]["resets_at"])
 
 
 def _fetch_plan(secrets: Secrets) -> tuple[float, str]:
@@ -294,7 +228,8 @@ def _fetch_endpoint(secrets: Secrets) -> tuple[float, str]:
     resp.raise_for_status()
     limits = resp.json().get("limits") or {}
     shares = {
-        name: float((limits.get(name) or {}).get("usage") or 0.0) for name in ("session", "weekly")
+        name: float((limits.get(name) or {}).get("usage") or 0.0)
+        for name in ("session", "weekly")
     }
     worst = max(shares.values(), default=0.0)
     if worst > 1.0:

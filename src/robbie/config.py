@@ -169,15 +169,8 @@ class Choice:
 
 
 class BudgetConfig(_Strict):
-    # backend=api, AND the floor under backend=oauth when the plan meter cannot
-    # be read. That stopped being a rare case in Nov 2026: the Ultra plan lost its
-    # five-hour window, so the key the gate read went null and "unreadable" became
-    # the steady state. Measured locally from each run's `total_cost_usd`, so no
-    # change to a vendor's response shape can switch it off.
-    daily_usd: float = 20.0
-    # backend=oauth: pause at this % of the worst ACTIVE window the plan reports.
-    # Not a named window — see budget.worst_active_limit for why.
-    stop_pct: int = 70
+    daily_usd: float = 20.0  # backend=api
+    stop_pct: int = 70  # backend=oauth: pause at this % of the 5h window
     # Held back per review in flight: the gate reads what has been spent, and a
     # running container has not finished spending. Erring high costs idle quota,
     # erring low costs the cutoff, so these are deliberately generous.
@@ -394,10 +387,14 @@ def load_secrets(cfg: Config) -> Secrets:
     s = Secrets(
         gh_token=SecretStr(gh_token),
         slack_bot_token=SecretStr(_require("SLACK_BOT_TOKEN")),
-        reviewer_gh_token=SecretStr(os.environ.get("GH_TOKEN_REVIEWER", "").strip() or gh_token),
+        reviewer_gh_token=SecretStr(
+            os.environ.get("GH_TOKEN_REVIEWER", "").strip() or gh_token
+        ),
         anthropic_api_key=_optional_secret("ANTHROPIC_API_KEY"),
         claude_credentials=(
-            Path(os.environ["CLAUDE_CREDENTIALS"]) if os.environ.get("CLAUDE_CREDENTIALS") else None
+            Path(os.environ["CLAUDE_CREDENTIALS"])
+            if os.environ.get("CLAUDE_CREDENTIALS")
+            else None
         ),
         review_base_url=os.environ.get("REVIEW_BASE_URL", "").strip() or None,
         review_api_token=_optional_secret("REVIEW_API_TOKEN"),
