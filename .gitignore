@@ -1,5 +1,5 @@
 .env
-config/robbie.yaml
+config/*.yaml
 config/slack-users.tsv
 config/claude-credentials.json
 
