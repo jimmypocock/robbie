@@ -206,6 +206,10 @@ class Config(_Strict):
     # engine and its machine markers stay robbie. Two instances of this code
     # can sign differently.
     bot_name: str = Field(default="robbie", pattern=r'^[^"\n]+$')
+    # an image for the byline, in place of the 🤖. Top-level signature only.
+    # Must render for a logged-out reader if the repo is public; a GitHub
+    # user-attachments URL 404s anonymously and suits a private repo only.
+    bot_icon: str = Field(default="", pattern=r'^(|https://[^"\s]+)$')
     slack: SlackConfig
     repos: list[RepoConfig] = Field(min_length=1)
     backend: Literal["api", "oauth"] = "api"
@@ -342,6 +346,7 @@ def load(path: str | Path | None = None) -> Config:
         raise SystemExit(f"config not found: {p} (set ROBBIE_CONFIG or pass --config)")
     cfg = Config.model_validate(_read_yaml(p))
     branding.set_name(cfg.bot_name)
+    branding.set_icon(cfg.bot_icon)
     try:
         cfg.transcript_dir.mkdir(parents=True, exist_ok=True)
     except OSError as ex:
