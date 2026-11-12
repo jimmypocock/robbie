@@ -33,6 +33,9 @@ class Anchored:
     leftovers: str = ""
     folded: str = ""
     folded_count: int = 0
+    # findings that reached no thread, so no resolve state: counted, not only
+    # rendered, because `inline` alone cannot tell these from a folded nitpick
+    leftover_count: int = 0
 
 
 def commentable(patch: str) -> set[int]:
@@ -146,7 +149,10 @@ def anchor(
             f"<details><summary>{len(folded)} {noun}, kept out of the threads — "
             "nothing to reply to</summary>\n\n" + "\n".join(folded) + "\n\n</details>"
         )
-    return Anchored(comments=comments, leftovers=text, folded=tucked, folded_count=len(folded))
+    return Anchored(
+        comments=comments, leftovers=text, folded=tucked,
+        folded_count=len(folded), leftover_count=len(leftovers),
+    )
 
 
 SEVERITY_LINE = re.compile(r":\d+")

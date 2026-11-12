@@ -43,6 +43,9 @@ CREATE TABLE IF NOT EXISTS reviews (
     should_fix   INTEGER,
     inline       INTEGER,                   -- of those, anchored to a diff line
     summary_findings INTEGER,               -- indexed in the summary instead
+    unanchored   INTEGER,                   -- wanted a thread, reached no changed line
+    folded       INTEGER,                   -- kept out of threads below inline_min
+    rejected     INTEGER,                   -- GitHub refused the inline comment
     ci_state     TEXT,             -- waiting|green|red|stale|gone|done|unlabeled|expired
     ci_seen_at   INTEGER,
     created_at   INTEGER NOT NULL,
@@ -115,7 +118,7 @@ class ReviewRow:
     hold_reason: str | None
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 class Db:
@@ -144,6 +147,8 @@ class Db:
                 ("should_fix", "INTEGER"), ("inline", "INTEGER")],
             3: [("summary_findings", "INTEGER")],
             4: [("ci_state", "TEXT"), ("ci_seen_at", "INTEGER")],
+            5: [("unanchored", "INTEGER"), ("folded", "INTEGER"),
+                ("rejected", "INTEGER")],
         }
         for step in range(version + 1, SCHEMA_VERSION + 1):
             columns = {row[1] for row in self.conn.execute("PRAGMA table_info(reviews)")}
@@ -205,6 +210,9 @@ class Db:
         should_fix: int | None = None,
         inline: int | None = None,
         summary_findings: int | None = None,
+        unanchored: int | None = None,
+        folded: int | None = None,
+        rejected: int | None = None,
         ci_state: str | None = None,
     ) -> None:
         """Writes only the columns it was given: a full-column UPDATE would null
@@ -217,7 +225,8 @@ class Db:
                 ("tokens_out", tokens_out), ("duration_s", duration_s),
                 ("transcript", transcript), ("model", model), ("findings", findings),
                 ("blocking", blocking), ("should_fix", should_fix), ("inline", inline),
-                ("summary_findings", summary_findings), ("ci_state", ci_state),
+                ("summary_findings", summary_findings), ("unanchored", unanchored),
+                ("folded", folded), ("rejected", rejected), ("ci_state", ci_state),
             )
             if value is not None
         }

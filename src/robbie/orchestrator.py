@@ -633,7 +633,8 @@ class Orchestrator:
             # how many of them reached a diff line, which is not the same number
             self.db.finish_review(
                 key, verdict=verdict, **self._pass_state("published"),
-                inline=result.inline, **common,
+                inline=result.inline, unanchored=result.unanchored,
+                folded=result.folded, rejected=result.rejected, **common,
             )
             await self._notify(repo, meta, verdict, findings)
             await self._tell_props(meta, "posted", verdict)

@@ -45,6 +45,11 @@ class PublishResult:
     posted: bool
     detail: str
     inline: int = 0
+    # why the rest of the findings opened no thread. Default 0 on every path
+    # that posts no findings at all, which is every path but publish_review.
+    unanchored: int = 0
+    folded: int = 0
+    rejected: int = 0
     url: str | None = None
 
 
@@ -122,7 +127,10 @@ async def publish_review(
             verdict, repo.slug, meta.number, len(full.encode()),
             len(anchored.comments), repo.needs_work_label, full,
         )
-        return PublishResult(False, "dry run", inline=len(anchored.comments))
+        return PublishResult(
+            False, "dry run", inline=len(anchored.comments),
+            unanchored=anchored.leftover_count, folded=anchored.folded_count,
+        )
 
     # a review carries its comments in one payload, so they all land or none do;
     # posted one at a time they land one at a time, and `inline` has to say so
@@ -169,6 +177,9 @@ async def publish_review(
         + (f" + {anchored.folded_count} folded" if anchored.folded_count else "")
         + f" + set {repo.needs_work_label!r}",
         inline=posted,
+        unanchored=anchored.leftover_count,
+        folded=anchored.folded_count,
+        rejected=missed,
         url=url or None,
     )
 

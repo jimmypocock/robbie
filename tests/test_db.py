@@ -296,3 +296,36 @@ def test_a_pass_that_never_recorded_inline_keeps_its_place_in_the_sweep(db):
     start(db)
     db.finish_review(KEY, state="published", verdict="ok")
     assert db.reviewed_prs("acme/app") == [7]
+
+
+def test_the_thread_accounting_columns_arrive_and_persist(db):
+    """A finding with no thread is the one the workflow cannot absorb.
+
+    `inline` says how many threads opened; on its own it cannot say whether the
+    rest were deliberate (folded below inline_min, or already posted on an
+    earlier pass) or lost — unanchored outside the diff, or rejected by GitHub.
+    Those are the rows a reviewer comparison has to be able to tell apart.
+    """
+    db.start_review(key="k", repo="acme/app", pr=7, head_sha="abc", requested_at="t")
+    db.finish_review(
+        "k", state="published", verdict="needs-work",
+        findings=5, inline=2, unanchored=2, folded=1, rejected=0,
+    )
+    row = db.conn.execute(
+        "SELECT findings, inline, unanchored, folded, rejected FROM reviews WHERE key='k'"
+    ).fetchone()
+    assert tuple(row) == (5, 2, 2, 1, 0)
+
+
+def test_zero_is_written_not_dropped(db):
+    """`finish_review` skips None to avoid nulling columns it was not given.
+
+    Zero is a real reading — "nothing was lost" — and must not be mistaken for
+    "not measured", or every clean review reads as unmeasured in the comparison.
+    """
+    db.start_review(key="z", repo="acme/app", pr=8, head_sha="abc", requested_at="t")
+    db.finish_review("z", state="published", unanchored=0, folded=0, rejected=0)
+    row = db.conn.execute(
+        "SELECT unanchored, folded, rejected FROM reviews WHERE key='z'"
+    ).fetchone()
+    assert tuple(row) == (0, 0, 0), "zero must reach the column, not be skipped as falsy"

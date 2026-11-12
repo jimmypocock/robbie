@@ -226,3 +226,21 @@ def test_blank_and_missing_are_the_same_thing():
     """A model that emits the keys with empty strings must not get " ·  · "."""
     assert _head({"severity": "must-fix", "category": "", "effort": "   ",
                   "title": "t", "body": "b"}) == "🔴 **Must-fix** — t"
+
+
+def test_leftovers_are_counted_not_only_rendered():
+    """The body already shows them; the count is what a two-week comparison reads.
+
+    A finding that cannot reach a changed line gets no thread and so no resolve
+    state — the case the workflow cannot absorb, and the one `inline` alone
+    cannot distinguish from a nitpick that was folded on purpose.
+    """
+    findings = [
+        {"severity": "must-fix", "path": "a.rb", "line": 10, "title": "t", "body": "b"},
+        {"severity": "must-fix", "path": "a.rb", "line": 900, "title": "t", "body": "b"},
+        {"severity": "must-fix", "path": "gone.rb", "line": 3, "title": "t", "body": "b"},
+    ]
+    out = anchor(findings, {"a.rb": {10, 11, 12}})
+    assert len(out.comments) == 1
+    assert out.leftover_count == 2, "both the far line and the untouched file are lost"
+    assert out.folded_count == 0
