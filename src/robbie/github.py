@@ -249,6 +249,12 @@ async def _commit_statuses(repo: str, sha: str) -> list[dict[str, Any]]:
 # hourly pool, and both daemons spent an hour unable to read their own queue.
 # One process holds one GH_TOKEN, so there is nothing to key this on and a plain
 # flag is the whole of it.
+#
+# NOT exactly once per process: the gate runs up to `max_concurrent_checks` (8)
+# of these at a time, so whichever are already in flight when the first refusal
+# returns pay for it too. Measured on the roll, 2026-11-12: four on Argus, one on
+# Themis. A lock would make it exactly one and is not worth it — the cost is at
+# most 8 doomed calls per process START against the ~500 AN HOUR this replaces.
 _CHECK_RUNS_READABLE = True
 
 
