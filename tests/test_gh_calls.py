@@ -26,6 +26,14 @@ def fake_gh(tmp_path, monkeypatch):
     return write
 
 
+@pytest.fixture(autouse=True)
+def _token_starts_optimistic(monkeypatch):
+    """`pr_meta` demotes a module flag for the life of the process, which is right
+    in a daemon and leaks between tests. Restored around every one of them so the
+    order they run in cannot decide what they measure."""
+    monkeypatch.setattr(gh_mod, "_CHECK_RUNS_READABLE", True)
+
+
 async def test_a_hung_call_gives_up_instead_of_blocking_the_tick(fake_gh, monkeypatch):
     """And gives up on the deadline, not when the children feel like exiting.
 
@@ -95,6 +103,34 @@ echo '{"number":7,"title":"t","url":"u","author":{"login":"dev"},
     assert meta.has_label("Code Review"), "the labels must survive the fallback"
     assert gh_mod.failing_checks(meta, ignore=()) == ["ci/circleci: build"]
     assert "cannot read check runs" in caplog.text
+
+
+async def test_the_token_is_only_asked_about_check_runs_once(fake_gh, tmp_path):
+    """The refusal is a property of the TOKEN, not of the PR, so asking per PR is
+    two GraphQL calls where one would do: the view that fails and the view that
+    retries without the field.
+
+    Measured on the two live instances 2026-11-12: 1,032 doomed calls in one hour,
+    about a fifth of the user-wide hourly pool, and both daemons spent an hour
+    unable to read their own queue. A fine-grained PAT can NEVER read a check run
+    (GitHub has no Checks permission for them), so a second ask cannot succeed.
+    """
+    argv = tmp_path / "argv"
+    fake_gh(f"""
+printf "%s\\n" "$@" >> {argv}
+if [[ "$*" == *statusCheckRollup* ]]; then
+  echo "GraphQL: Resource not accessible by personal access token" >&2; exit 1
+fi
+if [[ "$1" == "api" ]]; then echo '[]'; exit 0; fi
+echo '{{"number":7,"title":"t","url":"u","author":{{"login":"dev"}},
+       "headRefOid":"abc123","changedFiles":2,"labels":[],
+       "baseRefName":"main","state":"OPEN"}}'
+""")
+    for _ in range(3):
+        assert (await gh_mod.pr_meta("acme/app", 7)).head_sha == "abc123"
+
+    asked = argv.read_text().count("statusCheckRollup")
+    assert asked == 1, f"asked the token about check runs {asked} times, not once"
 
 
 async def test_any_other_failure_is_still_a_skip(fake_gh):

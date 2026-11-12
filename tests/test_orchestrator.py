@@ -139,6 +139,73 @@ async def test_the_gate_cache_does_not_cross_repos(orch, cfg, monkeypatch):
     assert [t.path for t in prior] == ["acme/other#7"]
 
 
+async def test_an_untouched_pr_does_not_pay_for_the_timeline_twice(orch, cfg, monkeypatch):
+    """`last_review_request` pages the whole issue timeline, and the gate wants it
+    for every queued PR on every tick.
+
+    Measured 2026-11-12: 642 REST calls in ONE gating pass, against a 5,000/hour
+    pool shared with the second instance, the props board and Jimmy's own `gh` —
+    both daemons spent an hour unable to read their own queue. GitHub bumps a PR's
+    `updatedAt` for every event a review request is, so a stamp identical to the
+    stored one is proof that no new request can be hiding behind it.
+    """
+    reads: list[int] = []
+
+    async def count(slug, number, reviewer):
+        reads.append(number)
+        return REQ
+
+    monkeypatch.setattr(orch_mod, "pr_meta", _async(pr(updated_at="2026-11-12T20:00:00Z")))
+    monkeypatch.setattr(orch_mod, "last_review_request", count)
+    monkeypatch.setattr(orch_mod, "my_threads", _async(PrThreads()))
+
+    for _ in range(3):
+        await orch._gate(cfg.repos[0], 7)
+
+    assert reads == [7], f"paid for the timeline {len(reads)} times, not once"
+
+
+async def test_a_pr_that_moved_is_read_again(orch, cfg, monkeypatch):
+    """The negative control, and the one that matters: the stamp is the WHOLE of
+    the evidence, so a PR that has been touched must be read again. A cache that
+    cannot miss would hold a stale answer over a real re-request, which is the
+    direction that stops a review silently."""
+    reads: list[str] = []
+
+    async def count(slug, number, reviewer):
+        reads.append("read")
+        return REQ
+
+    monkeypatch.setattr(orch_mod, "last_review_request", count)
+    monkeypatch.setattr(orch_mod, "my_threads", _async(PrThreads()))
+
+    for stamp in ("2026-11-12T20:00:00Z", "2026-11-12T20:00:00Z", "2026-11-12T21:30:00Z"):
+        monkeypatch.setattr(orch_mod, "pr_meta", _async(pr(updated_at=stamp)))
+        await orch._gate(cfg.repos[0], 7)
+
+    assert len(reads) == 2, f"{len(reads)} reads; the second stamp must cost one"
+
+
+async def test_a_view_with_no_stamp_is_never_treated_as_unchanged(orch, cfg, monkeypatch):
+    """An absent `updatedAt` is UNKNOWN, not "nothing happened". Reading empty as
+    a match would make every PR a permanent cache hit and bury re-requests — the
+    partial-view mistake this house keeps paying for."""
+    reads: list[str] = []
+
+    async def count(slug, number, reviewer):
+        reads.append("read")
+        return REQ
+
+    monkeypatch.setattr(orch_mod, "pr_meta", _async(pr()))  # no stamp
+    monkeypatch.setattr(orch_mod, "last_review_request", count)
+    monkeypatch.setattr(orch_mod, "my_threads", _async(PrThreads()))
+
+    for _ in range(3):
+        await orch._gate(cfg.repos[0], 7)
+
+    assert len(reads) == 3, "an unknown stamp must never count as unchanged"
+
+
 # ----- a PR a human has taken ----------------------------------------------
 
 

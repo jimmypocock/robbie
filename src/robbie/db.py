@@ -94,6 +94,22 @@ CREATE TABLE IF NOT EXISTS requested (
     PRIMARY KEY (repo, pr)
 );
 
+-- what the timeline last said, and the PR state it was true for.
+-- `last_review_request` pages the WHOLE issue timeline, and the gate wants it for
+-- every queued PR on every tick: measured 2026-11-12, 642 REST calls in one
+-- gating pass against a 5,000/hour pool shared with the second instance, the
+-- props board and Jimmy's own `gh`. GitHub bumps a PR's `updatedAt` for every
+-- event a review request is, so an identical stamp is proof the stored answer
+-- still holds. An EMPTY stamp is never stored: unknown is not unchanged.
+CREATE TABLE IF NOT EXISTS request_seen (
+    repo         TEXT    NOT NULL,
+    pr           INTEGER NOT NULL,
+    head_sha     TEXT    NOT NULL,  -- belt and braces; a push moves the stamp too
+    updated_at   TEXT    NOT NULL,  -- the PR's own stamp when we last paid
+    requested_at TEXT    NOT NULL,  -- what the timeline said then
+    PRIMARY KEY (repo, pr)
+);
+
 -- cold start: the first poll of a repo records its backlog instead of
 -- reviewing it, so enabling robbie can't trigger a review storm
 CREATE TABLE IF NOT EXISTS seeded (
@@ -169,6 +185,37 @@ class Db:
             (key,),
         ).fetchone()
         return ReviewRow(**dict(row)) if row else None
+
+    def request_seen(
+        self, repo: str, pr: int, head_sha: str, updated_at: str
+    ) -> str | None:
+        """The stored timeline answer, but only while the PR has not moved since.
+
+        None means "go and pay for the read" — including when the stamp is empty,
+        because an absent stamp is unknown, not unchanged.
+        """
+        if not updated_at:
+            return None
+        row = self.conn.execute(
+            "SELECT requested_at FROM request_seen "
+            "WHERE repo=? AND pr=? AND head_sha=? AND updated_at=?",
+            (repo, pr, head_sha, updated_at),
+        ).fetchone()
+        return str(row["requested_at"]) if row else None
+
+    def note_request_seen(
+        self, repo: str, pr: int, head_sha: str, updated_at: str, requested_at: str
+    ) -> None:
+        """One row per PR: the question is only ever about its current state."""
+        if not updated_at:
+            return
+        self.conn.execute(
+            "INSERT INTO request_seen (repo, pr, head_sha, updated_at, requested_at) "
+            "VALUES (?, ?, ?, ?, ?) ON CONFLICT(repo, pr) DO UPDATE SET "
+            "head_sha=excluded.head_sha, updated_at=excluded.updated_at, "
+            "requested_at=excluded.requested_at",
+            (repo, pr, head_sha, updated_at, requested_at),
+        )
 
     def sha_was_judged(self, repo: str, pr: int, head_sha: str) -> bool:
         """True when this exact commit already got a pass or a recorded hold.

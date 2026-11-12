@@ -42,6 +42,10 @@ class PrMeta:
     checks: tuple[dict[str, Any], ...]
     base_ref: str = "main"
     state: str = "OPEN"
+    # GitHub's own "last touched" stamp. Defaults to empty, and empty means
+    # UNKNOWN rather than unchanged — a view that carried no stamp is not evidence
+    # that nothing happened, and reading it as such would skip a real re-request.
+    updated_at: str = ""
 
     def has_label(self, name: str) -> bool:
         return name in self.labels
@@ -221,7 +225,7 @@ async def fixing_prs(repo: str, number: int) -> list[str]:
 
 PR_FIELDS = (
     "number,title,url,author,headRefOid,changedFiles,labels,"
-    "statusCheckRollup,baseRefName,state"
+    "statusCheckRollup,baseRefName,state,updatedAt"
 )
 FORBIDDEN_NODE = "not accessible by personal access token"
 
@@ -236,28 +240,55 @@ async def _commit_statuses(repo: str, sha: str) -> list[dict[str, Any]]:
     ) or []
 
 
-async def pr_meta(repo: str, pr: int) -> PrMeta:
-    try:
-        data = await gh_json("pr", "view", str(pr), "--repo", repo, "--json", PR_FIELDS)
-    except GhError as ex:
-        if FORBIDDEN_NODE not in str(ex):
-            raise
-        # No fine-grained PAT can read a check run — GitHub has no Checks permission
-        # for them — and one unreadable node fails the whole view rather than nulling
-        # itself out, taking the labels and the sha with it. Commit statuses still
-        # come back over REST, so the PR is judged on those instead of being skipped.
-        data = await gh_json(
-            "pr", "view", str(pr), "--repo", repo,
-            "--json", PR_FIELDS.replace("statusCheckRollup,", ""),
+# Starts optimistic and is demoted ONCE, for the life of the process. No
+# fine-grained PAT can read a check run — GitHub has no Checks permission for
+# them — so the refusal belongs to the TOKEN, not to the PR, and a second ask
+# cannot succeed. Asking per PR costs two GraphQL calls where one would do: the
+# view that fails and the view that retries. Measured 2026-11-12 across the two
+# live instances: 1,032 doomed calls in one hour, about a fifth of the user-wide
+# hourly pool, and both daemons spent an hour unable to read their own queue.
+# One process holds one GH_TOKEN, so there is nothing to key this on and a plain
+# flag is the whole of it.
+_CHECK_RUNS_READABLE = True
+
+
+async def _view_without_checks(repo: str, pr: int) -> dict[str, Any]:
+    """The view this token CAN make, with commit statuses standing in for the rollup.
+
+    One unreadable node fails the whole `pr view` rather than nulling itself out —
+    it takes the labels and the sha with it — and the statuses come back over REST,
+    so the PR is judged on what the token can see instead of being skipped.
+    """
+    data = await gh_json(
+        "pr", "view", str(pr), "--repo", repo,
+        "--json", PR_FIELDS.replace("statusCheckRollup,", ""),
+    )
+    if data:
+        data["statusCheckRollup"] = await _commit_statuses(
+            repo, data.get("headRefOid") or ""
         )
-        if data:
-            data["statusCheckRollup"] = await _commit_statuses(
-                repo, data.get("headRefOid") or ""
+    return data or {}
+
+
+async def pr_meta(repo: str, pr: int) -> PrMeta:
+    global _CHECK_RUNS_READABLE
+    if _CHECK_RUNS_READABLE:
+        try:
+            data = await gh_json(
+                "pr", "view", str(pr), "--repo", repo, "--json", PR_FIELDS
             )
+        except GhError as ex:
+            if FORBIDDEN_NODE not in str(ex):
+                raise
+            _CHECK_RUNS_READABLE = False
             logger.warning(
-                "%s#%s: this token cannot read check runs; judged on commit statuses only",
+                "%s#%s: this token cannot read check runs; judging on commit statuses "
+                "from here on, and not asking again this process",
                 repo, pr,
             )
+            data = await _view_without_checks(repo, pr)
+    else:
+        data = await _view_without_checks(repo, pr)
     if not data:
         raise GhError(f"could not fetch {repo}#{pr}")
     return PrMeta(
@@ -271,6 +302,7 @@ async def pr_meta(repo: str, pr: int) -> PrMeta:
         changed_files=int(data.get("changedFiles") or 0),
         labels=tuple(lbl["name"] for lbl in data.get("labels") or []),
         checks=tuple(data.get("statusCheckRollup") or []),
+        updated_at=str(data.get("updatedAt") or ""),
     )
 
 

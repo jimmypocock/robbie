@@ -322,7 +322,7 @@ class Orchestrator:
                 logger.info("%s#%s: %s — a human has it; done reviewing", repo.slug, pr, done)
             return meta, "", "", Decision("skip", f"{done} — a human has it")
 
-        requested_at = await last_review_request(repo.slug, pr, repo.reviewer_login)
+        requested_at = await self._requested_at(repo, meta)
         key = dedup_key(repo.slug, pr, meta.head_sha, requested_at)
         prior = self.db.get_review(key)
         if (judged := already_judged(prior.state if prior else None)) is not None:
@@ -337,6 +337,29 @@ class Orchestrator:
             sha_judged=self.db.sha_was_judged(repo.slug, pr, meta.head_sha),
             open_threads=sum(1 for t in threads if t.awaiting_author),
         )
+
+    async def _requested_at(self, repo: RepoConfig, meta: PrMeta) -> str:
+        """`last_review_request`, but not paid for twice over an untouched PR.
+
+        It pages the whole issue timeline and the gate above wants it for every
+        queued PR on every tick — the single most expensive read in a tick, and
+        almost always to learn the answer it already had. GitHub bumps `updatedAt`
+        for every event a review request is, so a stamp matching the stored one is
+        proof no new request is hiding; anything else, including no stamp at all,
+        pays the read.
+        """
+        if (known := self.db.request_seen(
+            repo.slug, meta.number, meta.head_sha, meta.updated_at
+        )) is not None:
+            return known
+        requested_at = await last_review_request(
+            repo.slug, meta.number, repo.reviewer_login
+        )
+        if not self.dry_run:
+            self.db.note_request_seen(
+                repo.slug, meta.number, meta.head_sha, meta.updated_at, requested_at
+            )
+        return requested_at
 
     async def _act(
         self,
