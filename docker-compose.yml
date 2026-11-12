@@ -48,6 +48,48 @@ services:
       reviewer-image:
         condition: service_completed_successfully
 
+  # ---- Themis: the second reviewer (opt in) -------------------------------
+  #
+  # Same image, same account, same GitHub login as `robbie` above — which runs
+  # as Argus, the leader. This one reads themis.yaml instead: its own byline,
+  # its own Slack app, the scanner reviewer image, and a breadth-first command.
+  #
+  #   docker compose --profile themis up -d themis
+  #
+  # ITS OWN state_dir, and that is the load-bearing part. Posted-once bookkeeping
+  # lives in SQLite rather than on GitHub, so one database per instance is what
+  # stops Argus's dedupe keys from swallowing Themis's posts. Point both at one
+  # state dir and the second reviewer silently posts nothing.
+  #
+  # Measured 2026-11-11: a reviewer peaks at 230 MiB against its 4g cap, and
+  # `--memory` is a limit rather than a reservation, so both run side by side on
+  # the 6 GiB VM with no stagger.
+  themis:
+    profiles: [themis]
+    image: robbie-orchestrator:latest
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    stop_grace_period: 35m
+    env_file: .env
+    environment:
+      # the one value that must differ, so the two sign differently in Slack
+      SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN_THEMIS:?set SLACK_BOT_TOKEN_THEMIS in .env}
+      ROBBIE_CONFIG: /etc/robbie/themis.yaml
+    networks: [robbie]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./config:/etc/robbie:ro
+      # its own database; see the note above
+      - ${ROBBIE_STATE_THEMIS:-robbie-state-themis}:${ROBBIE_STATE_THEMIS:-/var/lib/robbie}
+      # shared read-only with Argus: one clone, two readers
+      - ${ROBBIE_MIRRORS:-/srv/robbie/repos}:${ROBBIE_MIRRORS:-/srv/robbie/repos}:ro
+      - ${ROBBIE_POLICY:-/opt/robbie/policy}:${ROBBIE_POLICY:-/opt/robbie/policy}:ro
+      - ${CLAUDE_CREDENTIALS_DIR:-/dev/null}:${CLAUDE_CREDENTIALS_DIR:-/dev/null}:ro
+    depends_on:
+      reviewer-image:
+        condition: service_completed_successfully
+
   # not a service: builds the reviewer image so `compose up` can't start the
   # orchestrator before the image its containers need exists
   reviewer-image:
