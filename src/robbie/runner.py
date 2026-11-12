@@ -192,6 +192,10 @@ def _stem(
     if model:
         # a docker name and a filename both refuse most of what a model tag holds
         tag = f"{tag}-{re.sub(r'[^A-Za-z0-9]+', '-', model).strip('-')}"
+    if cfg.instance:
+        # same escaping, same reason: a container name is a daemon-wide
+        # namespace and two instances review the same commits
+        tag = f"{tag}-{re.sub(r'[^A-Za-z0-9]+', '-', cfg.instance).strip('-')}"
     return tag
 
 

@@ -210,6 +210,14 @@ class Config(_Strict):
     # Must render for a logged-out reader if the repo is public; a GitHub
     # user-attachments URL 404s anonymously and suits a private repo only.
     bot_icon: str = Field(default="", pattern=r'^(|https://[^"\s]+)$')
+    # Discriminates this instance's reviewer CONTAINERS from another instance's
+    # on the same docker daemon. Two reviewers on one machine reviewing one
+    # commit built the same `--name` and the second died with exit 125, losing
+    # the review (measured 2026-11-12, four in an hour). Transcripts were always
+    # safe — they sit under state_dir, which already differs. Empty means the
+    # names stay exactly as they were, so a single-instance deployment is
+    # untouched.
+    instance: str = Field(default="", pattern=r'^[^"\n]*$')
     slack: SlackConfig
     repos: list[RepoConfig] = Field(min_length=1)
     backend: Literal["api", "oauth"] = "api"

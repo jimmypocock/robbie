@@ -318,9 +318,18 @@ def test_nothing_a_pr_may_not_read_shares_the_reviewers_network():
         name for name, svc in compose["services"].items()
         if "robbie" in (svc.get("networks") or [])
     }
-    assert on_it == {"robbie", "model-proxy", "mcp-sentry"}, (
+    # themis joined 2026-11-12: a second orchestrator, same role and same risk
+    # as `robbie` — it polls, it serves nothing, and it needs model-proxy by name.
+    assert on_it == {"robbie", "themis", "model-proxy", "mcp-sentry"}, (
         "a service joined the reviewers' network; it must be one a PR may read"
     )
+    # The list above is a list, so it can be appended to. This is the property
+    # that made the dashboard dangerous and keeps the orchestrators safe: a
+    # reviewer runs a PR's own code, and nothing it can reach by name may be
+    # listening. Adding a service with `ports:` to that network fails here even
+    # if someone also adds its name above.
+    serving = {n for n in on_it if compose["services"][n].get("ports")}
+    assert not serving, f"a service on the reviewers' network publishes ports: {serving}"
 
 
 def test_the_thing_that_can_write_is_not_on_the_reviewers_network():
@@ -674,4 +683,41 @@ def test_a_container_name_stays_legal_for_docker(tmp_path):
     import re as _re
     cfg = _cfg(tmp_path)
     name = _stem(cfg, cfg.repos[0], _pr(), "glm-5.2:cloud")
+    assert _re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", f"robbie-{name}"), name
+
+
+def test_two_instances_do_not_collide_on_one_container_name(tmp_path):
+    """Measured 2026-11-12: four reviews lost to `Conflict. The container name
+    "/robbie-<repo>-<pr>-..." is already in use`.
+
+    Argus and Themis run on one docker daemon and review the same commits. The
+    transcript path is already safe — it sits under each instance's own
+    state_dir — but a container name is a daemon-wide namespace, so the second
+    instance to reach a commit died with exit 125 and the review was lost.
+    `model` already discriminates two runs on one commit; `instance` is the
+    same idea for two daemons' worth of reviewers on one machine.
+    """
+    argus = _cfg(tmp_path)
+    themis = _cfg(tmp_path)
+    themis.instance = "themis"
+    pr = _pr()
+    assert _stem(argus, argus.repos[0], pr, None) != _stem(themis, themis.repos[0], pr, None)
+
+
+def test_an_unset_instance_leaves_the_name_exactly_as_it_was(tmp_path):
+    """One-instance deployments must not have their container names churn:
+    JM's upstream runs a single reviewer and nothing about it should move."""
+    cfg = _cfg(tmp_path)
+    assert cfg.instance == ""
+    pr = _pr()
+    expected = f"{cfg.repos[0].name}-{pr.number}-{pr.head_sha[:8]}"
+    assert _stem(cfg, cfg.repos[0], pr, None) == expected
+
+
+def test_an_instance_name_stays_legal_for_docker(tmp_path):
+    """Same constraint the model tag has: a --name may not carry colons."""
+    import re as _re
+    cfg = _cfg(tmp_path)
+    cfg.instance = "Themis v2:beta"
+    name = _stem(cfg, cfg.repos[0], _pr(), None)
     assert _re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", f"robbie-{name}"), name
